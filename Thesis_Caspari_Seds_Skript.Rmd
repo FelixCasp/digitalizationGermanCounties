@@ -1,0 +1,1001 @@
+---
+title: "Digitalization in the German county sphere"
+subtitle: "Script for the thesis in M.Sc. Social and Economic Data Science"
+author: 
+- name          : "Felix Caspari"
+  affiliation   : "University of Konstanz; Author and Graduating student Master of Sience Social and Economic Data Science"
+  email         : "felix.caspari@uni-konstanz.de"
+- name          : "Prof. Dr. Susumu Shikano"
+  affiliation   : "University of Konstanz; First assesor"
+  email         : "https://www.polver.uni-konstanz.de/cdm/people/faculty/shikano/"
+- name          : "Jun.-Prof. Dr. Andreas Spitz"
+  affiliation   : "University of Konstanz; Second assesor"
+  email         : "https://scikon.uni-konstanz.de/personen/profile/andreas.spitz/"
+date: "15th of March 2022"   
+affiliation: "Student number: 01/1012736"
+semester: "2021/22"
+output: 
+  html_document: 
+      theme: cerulean
+      toc: true
+      toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loading of Packages and preparation
+Some of the packages have to be installed manually first 
+```{r devtool package, include=TRUE}
+
+devtools::install_github("paul-buerkner/brms")
+devtools::install_github("mvuorre/brmstools")
+
+```
+
+```{r package import}
+# install pacman package if not installed -----------------------------------------------
+suppressWarnings(if (!require("pacman")) install.packages("pacman"))
+
+# load packages and install if not installed --------------------------------------------
+pacman::p_load(tidyverse,
+               car, 
+               survey,
+               vtable,
+               Rcpp,
+               sjmisc,
+               BayesFactor,
+               NPMLEmix,
+               BEST,
+               psych,
+               tidyr,
+               simr,
+               data.table,
+               heatmaply,
+               pwr,
+               gtsummary,
+               googleway,
+               ggrepel,
+               ggspatial,
+               gghighlight,
+               libwgeom,
+               mapsf,
+               tibble,
+               sf,
+               grDevices,
+               lm.beta,
+               psycho,
+               lmtest,
+               standardize,
+               knitr,
+               gridExtra,
+               naniar,
+               ggridges,
+               tidybayes,
+               gapminder, 
+               foreign, 
+               srvyr,
+               readr,
+               haven, 
+               mice, 
+               mitools, 
+               dplyr,
+               magrittr,
+               purrr,
+               lubridate,
+               stringr,
+               ggplot2,
+               ggthemes,
+               tidyverse,
+               xml2,
+               car,
+               stats,
+               sjPlot,
+               lme4,
+               tidyr,
+               readxl,
+               httr,
+               shinystan,
+               brms,
+               brmstools,
+               here,
+               ltm, 
+               MASS,
+               msm,
+               polycor,
+               writexl,
+               mvtnorm,
+               mirt,
+               tab,
+               latticeExtra,
+               igraph, 
+               install = TRUE,
+               update = FALSE)
+
+# show loaded packages ------------------------------------------------------------------
+cat("loaded packages\n")
+print(pacman::p_loaded())
+```
+## Bayesian Power Analysis
+
+We perform power analysis to determine minimum sample size. Power analyses are an important part in the preparation of studies. They can answer the question about the required sample size, but also about the underlying statistical power. A power analysis is usually performed before the actual survey (a priori) - mostly to estimate the sample size needed for the study. That is the goal of this analysis. Due to the fact that we want to apply a Bayesian Model, we also use a Bayesian Power Analysis. We Build on the propability of seeing a bayes factor (in the case of this work it is 1/3). However we only control for one treatment and control group (e.g. no Digitalization strategy and Digitalization strategy) and not linear relationships or alike. We check sample size for a medium effect, since literature and theory are not pointing a clear path.
+
+```{r bayesian power analysis, echo=TRUE}
+
+D<-0.4 #Set the true effect size
+n<-50 #Set sample size of your study (number in each group)
+nSim<-100000 #Set number of simulations (it takes a while, be patient)
+rscaleBF<-sqrt(2)/2 #Set effect size of alternative hypothesis (default = sqrt(2)/2, or 0.707)
+threshold<-3 #Set threshold for 'support' - e.g., 3, 10, or 30
+
+bf<-numeric(nSim)
+
+# create progress bar because it might take a while
+pb <- winProgressBar(title = "progress bar", min = 0, max = nSim, width = 300)
+
+for(i in 1:nSim){ #for each simulated experiment
+  setWinProgressBar(pb, i, title=paste(round(i/nSim*100, 1), "% done"))
+    x<-rnorm(n = n, mean = 0, sd = 1)
+  y<-rnorm(n = n, mean = D, sd = 1) 
+  bf[i] <- exp((ttestBF(x,y, rscale = rscaleBF))@bayesFactor$bf)
+}
+close(pb)#close progress bar
+
+supportH0 <- sum(bf<(1/threshold))/nSim
+supportH1 <- sum(bf>threshold)/nSim
+
+cat("The probability of observing support for the null hypothesis is ",supportH0)
+cat("The probability of observing support for the alternative hypothesis is ",supportH1)
+
+Hist_medium_effect <-hist(log(bf), breaks=20)
+
+```
+
+Adapting the plot 
+
+```{r histogram bayesian power analysis, echo=TRUE}
+
+plot(Hist_medium_effect, col = "#56B1F7", main="Probabillity of Bayes Factor", sub = "Substantial evidence P|A| = 1/10 - 1/3     n = 120")
+abline(v = 1, col = "red" ,lty = c(2), lwd = c(1)) 
+```
+
+
+
+## Sampling
+
+A dataset for all counties in Germany is imported, which builds the base for the sampling process. Kreisfreie Städte are excluded. Data is retrieved from INKAR. 
+```{r import raw data, echo=TRUE}
+All_Counties <- read_excel("inkar_all_counties.xlsx")
+View(All_Counties)
+```
+
+
+
+Sampling is done using the survey package. As the bayesian sample size supports a medium effect at a sample size of 100 we add around 10% of cases more to guarantee the stratified sample to work properly. We use the survey package and stratify our sample according to the population numbers of the states and overall Germany. 
+
+```{r sampling, echo=TRUE}
+#set.seed(2020)
+
+sample_size = 114
+
+str_sample <-
+  All_Counties %>%
+  mutate(strata = round(sample_size * Einwohner_Land /82000000)) %>% ##Stratified sampling according to population size 
+  group_by(Bundesland) %>%
+  sample_n(strata,  replace = TRUE) %>%
+  ungroup()
+
+str_sample %>% count(Bundesland)
+
+```
+
+
+After all the data needed is included (Digitalization Measures), the data set with the incorporated binary items is imported. 
+
+```{r import sample data, echo=TRUE}
+Sample_full <- read_excel("strata_sample_full.xlsx")
+View(Sample_full)
+
+SampleV1 <- Sample_full
+```
+
+
+## Item Response Theory
+
+IRT Modeling starts. Due to performance comparisons different approaches and packages are tested, however because of its accuracy of weighting individual cases, f1 scores together with the suited method map are used at last. Packages ltm and Mirt have been used.
+Still different plots like traceplots or itemplots are shown, in order to check for usabillity of the collected data.
+Furthermore for translation purposes, one has to change the german terms for the individual items into english 
+
+
+```{r IRT, echo=TRUE}
+
+# select digitaztion measures (excudlude Glasfibreconstruction, due to the fact that all counties invest in broadband expansion)
+IRT_Test_final <- SampleV1[c(15:17,19:38)]
+
+#rename the German item names into english ones
+IRT_Test_final <- IRT_Test_final %>% 
+  rename(
+    OnlineServices = `Bürgerservice Online`,
+    Data_Mng = `AktmanagementSystem`,
+    Communications = `Interne/externe Kommunikation` ,
+    IoT = `Datennetzwerk`,
+    Digihub = `InnZtr`,
+    Debt = `VK-App`,
+    Honorary = Ehrenamt,
+    Shuttle = `Ruf-Shu`,
+    Participation = Platfor,
+    Knowledge_Platform = WissPlat,
+    PatientRecord = PatiAkt,
+    DigEducation = Bildung,
+    )
+alpha(IRT_Test_final, check.keys =TRUE) #Raw  Alpha is above > 0.6 (0.64), which is still acceptable.Furthermore I could release Datennetzwerk because the reliabillity score std. alpha (reliabilitty when item is dropped) is rising to 0.65 Moreover, the increase in Cronbach's alpha is small (from 0.64 to 0.65 = +0.01). In order to maintain the diversity of the scale, this item is retained - despite or precisely because of only a marginal improvement.
+```
+
+
+```{r IRT 2, echo=TRUE}
+
+str(IRT_Test_final)
+
+IRTModel_final = ltm(IRT_Test_final ~ z1,IRT.param = TRUE)
+
+summary(IRTModel_final)
+#IRTmodel[["coefficients"]]
+coef(IRTModel_final)
+coefIRTmodel_final<- coef(IRTModel_final)
+coefIRTmodel_final <-as.data.frame(coefIRTmodel_final)
+coefIRTmodel_final <- coefIRTmodel_final[ -c(1) ] #exclude item difficulty and keep discrimination for explanatory power
+coefIRTmodel_final$Dscrmn<- round(coefIRTmodel_final$Dscrmn, digits = 2)#round the derived derivation weights to second digit.
+
+
+#plotting
+plot(IRTModel_final, type = "ICC") # wee can see that most of the items lead our way and show reasonable to well directed Item responses, the more S shaped our plot is the better is out explanatory or discriminaatory power(discrimination)
+
+plot(IRTModel_final, type = "IIC") # Some variables seem to show a veryd good level of information gain, other ones do not show that level, thats why our weights get very important. Before adapating our model. 
+
+
+#testing another package to enhance validity of Item Response test 
+
+### Estimating IRT model using Mirt 
+mirtmodel_final <- mirt(IRT_Test_final, ### Data used to estimate model
+                1,          ### Type of model to estimate. 2pl model is used. 
+                itemtype = '2PL')          
+### Inspecting items
+for(i in 1:length(IRT_Test_final)){
+  ItemPlot_final <- itemfit(mirtmodel_final, 
+                      group.bins=15,
+                      empirical.plot = i,
+                      empirical.CI = .95,
+                      method = 'ML') 
+  print(ItemPlot_final)
+}#first impression is very similar to ltm some items not seem to be very usedul and even measuring a leading into the opposite area
+
+plot(mirtmodel_final, type ='trace')
+plot(mirtmodel_final, type ='infotrace') # Item energy for instance lots of information but very localized, while wissensplattform for instance or Open data are not giving that much information but are more spread out. 
+plot(mirtmodel_final, type ='infotrace', facet_items = F)
+
+plot(mirtmodel_final, type ='infoSE')# doint rather well in  relatively broade sense however, more items seem to have less ability to measure to construct (see positioning on the left scale side). Standard error is acceptable. 
+
+
+mirtmodel_coefs_final <- coef(mirtmodel_final, simplify = T, IRTpars = T)
+
+
+kable(fscores(mirtmodel_final))
+
+
+#In the Ende as stated the author wanted to derive factor scores. Multiple methods can be used, from the case of this work
+#MAP seems to be better than EAP because it can handle a high number of individual binary items better. 
+F1Compare <- fscores(mirtmodel_final,method = "MAP") # checking out different method
+F1Compare <- as.data.frame(F1Compare)
+
+F1Compare$F1EAP <-fscores(mirtmodel_final,method = "EAP")#comparing both
+
+kable(F1Compare)
+
+```
+
+## Index construction
+
+As mentioned fscores are used for weighting the individual cases concerning their additive item sums(Additive Index), hence they are multiplied by the fscore. 
+```{r Index construction, echo=TRUE}
+
+Index_Dataset <- SampleV1 #including this data in a new dataset
+
+##weighted score with fscores retrieved from mirt IRT
+
+Index_Dataset$item_sum <- rowSums(Index_Dataset[ , c(15:39)], na.rm=TRUE)
+
+Index_Dataset$fscoreMAP <- fscores(mirtmodel_final,method = "MAP")
+Index_Dataset$DigInd_f1_100MAP <- Index_Dataset$item_sum * Index_Dataset$fscoreMAP # Index construction in general
+Index_Dataset$DigInd_f1_100MAP <-  round(scales::rescale(-Index_Dataset$DigInd_f1_100MAP, to = c(100, 1)))##check for 1-100 scale
+```
+
+
+
+
+Rename German items 
+```{r renaming, echo=TRUE}
+Index_Dataset <- Index_Dataset %>% 
+  rename(
+    Students = `Studierende je 100 Einwohner 18 bis 25 Jahre`,
+    Distance = `Erreichbarkeit von Oberzentren`,
+    Jobless = Arbeitslosenquote,
+    GDP = `Bruttoinlandsprodukt je Einwohner`,
+    Ppot = `Regionales Bevölkerungspotenzial`,
+    Debt = `Kommunale Schulden`,
+    Pop = Einwoher_Landkreis,
+    Commuters = `Pendlersaldo`,
+    Life_exp = Lebenserwartung,
+    uni_county = Hochschulen
+    )
+
+```
+
+
+Merge with Data from the broadband Atlas 
+```{r merge with broadband data, echo=TRUE}
+Broadbandatlas_Germany <- read_excel("Broadbandatlas_Germany.xlsx")
+View(Broadbandatlas_Germany)
+Index_Dataset_context <- merge(Index_Dataset,Broadbandatlas_Germany,by="Kennziffer")
+
+Index_Dataset_context <- Index_Dataset_context %>% 
+  rename(
+    Broadband = `≥50_Mbits`,
+    )
+
+view(Index_Dataset_context)#some cases got lost, check for the difference
+
+```
+
+
+
+
+## Political Synergy Variable
+
+
+In the political Synergy variable each time a party affiliation is met on higher government levels or head of state government or head of federal government a 1 is added. Simple visualization can be obtained from the flowchart. 
+
+![Flowchart of political Synergy Variable.Source: Author.](PolSynFlowChart.png)
+
+
+```{r political synergy, echo=TRUE}
+
+Index_Dataset_context <- Index_Dataset_context%>%mutate(pol_syner = case_when(
+  (Index_Dataset_context$Partei == Index_Dataset_context$Party_Innen_Land & Index_Dataset_context$Partei == Index_Dataset_context$Party_RegChef & Index_Dataset_context$Partei == Index_Dataset_context$Party_Innen_Bund) ~ 3,
+  ((Index_Dataset_context$Party_Innen_Land == Index_Dataset_context$Partei) & (Index_Dataset_context$Partei == Index_Dataset_context$Party_RegChef))|(Index_Dataset_context$Partei == Index_Dataset_context$Party_Innen_Bund & Index_Dataset_context$Partei == Index_Dataset_context$Party_RegChef) ~ 2,
+  (Index_Dataset_context$Partei == Index_Dataset_context$Party_Innen_Bund) | (Index_Dataset_context$Partei == Index_Dataset_context$Party_Innen_Land) |(Index_Dataset_context$Partei == Index_Dataset_context$Party_RegChef) ~ 1,
+  TRUE ~ 0
+))
+
+```
+
+## Independent candidate variable
+
+```{r Independent candidate variable, echo=TRUE}
+
+Index_Dataset_context$no_party<-ifelse (Index_Dataset_context$Partei == 'parteilos',1,0) #onehot for parteilos
+Index_Dataset_context$no_party <- as.factor(Index_Dataset_context$no_party)
+
+```
+
+## Digitalization Strategy variable
+
+```{r digitalization strategy variable, echo=TRUE}
+
+Index_Dataset_context$dig_stry<-ifelse (Index_Dataset_context$Digitstrategie == 1,1,0) #onehot for digitalstrategy
+Index_Dataset_context$dig_stry <- as.factor(Index_Dataset_context$dig_stry)
+
+```
+
+## Normalization of dataset
+
+```{r normalization, echo=TRUE}
+
+lapply(Index_Dataset_context,class)
+
+
+Index_Dataset_context_norm <- Index_Dataset_context 
+
+
+Index_Dataset_context_norm <- Index_Dataset_context_norm %>%
+    mutate_if(is.numeric, scale)
+
+
+```
+
+
+
+## Descriptics
+
+The purpose of this section is to provide a descriptive overview of the key data points. For visualization purposes, a heat map was derived which shows the normalized values, since the parameter ranges differ widely and comparability is ensured by standardization. 
+```{r descriptics, echo=TRUE}
+
+
+Descriptics <-Index_Dataset_context_norm[c(2:14, 43:47, 55,57:60)]#produce dataset for overview of descriptive variable information
+
+Descriptics <- Descriptics %>% 
+  rename(
+    "Life Expectancy" = Life_exp,
+    "Pop per state" = Einwohner_Land,
+    "Pop per county" = Pop,
+    "Avg Age per state" = Avg_Age_state,
+    "IT Jobs per state" = IT_Jobs,
+    "Politcal Synergy" = pol_syner,
+    "Density per state" = Density_state,
+    "GDP per state" = GDP_state,
+    "Uni per state" = uni_state,
+    "Digitalization Index" = DigInd_f1_100MAP,
+    )
+
+sumtable(Descriptics)
+sumtable(Descriptics, group = 'Bundesland')
+
+
+DescripticsNormal <- Index_Dataset_context_norm[c(2:14, 43:47, 55,57:60)]#giver overview for normalized values
+
+DescripticsNormal <- DescripticsNormal %>% 
+  rename(
+    "Life Expectancy" = Life_exp,
+    "Pop per state" = Einwohner_Land,
+    "Pop per county" = Pop,
+    "Avg Age per state" = Avg_Age_state,
+    "IT Jobs per state" = IT_Jobs,
+    "Politcal Synergy" = pol_syner,
+    "Density per state" = Density_state,
+    "GDP per state" = GDP_state,
+    "Uni per state" = uni_state,
+    "Digitalization Index" = DigInd_f1_100MAP,
+    )
+
+
+Averageperstate<- aggregate(DescripticsNormal[3:21], list(DescripticsNormal$Bundesland), FUN=mean)#get mean of the different federal states in order to 
+Averageperstate <- Averageperstate[-c(4,22,23)]
+Averageperstate$Group.1 <- as.factor(Averageperstate$Group.1)
+
+
+
+
+avgheatmap <- heatmaply(
+  Averageperstate,labRow= Averageperstate[,1], 
+  xlab = "Variables",
+  ylab = "Federal states", 
+  main = "Averaged normalized data across federal states"
+)
+
+```
+
+
+## Map visualization
+
+Plotting Data with the sf package
+
+Importing Shapefile for Counties
+```{r county shapedata, echo=TRUE}
+#Importing the shapefile for the counties
+
+
+kreise <- read_sf('shape/vg2500_krs.shp')
+
+kreise <- kreise %>% 
+  rename(
+    Kennziffer = RS,
+   
+    )
+
+```
+
+importing shapefile for Bundesländer
+```{r state shape data, echo=TRUE}
+#Importing the shapefile for the counties
+
+laender <- read_sf('shape/vg2500_bld.shp')
+
+laender <- laender %>% 
+  rename(
+    Bundesland = RS)
+
+laender$Bundesland[laender$Bundesland== "03"]<-"NI" #rename shapefiles country codes into understandable abbrevations of the 
+laender$Bundesland[laender$Bundesland== '05']<-"NRW"
+laender$Bundesland[laender$Bundesland== '06']<-"HE"
+laender$Bundesland[laender$Bundesland== '07']<-"RLP"
+laender$Bundesland[laender$Bundesland== '08']<-"BW"
+laender$Bundesland[laender$Bundesland== '09']<-"BY"
+laender$Bundesland[laender$Bundesland== '10']<-"SL"
+laender$Bundesland[laender$Bundesland== '12']<-"BR"
+laender$Bundesland[laender$Bundesland== '13']<-"MV"
+laender$Bundesland[laender$Bundesland== '14']<-"SN"
+laender$Bundesland[laender$Bundesland== '15']<-"SA"
+laender$Bundesland[laender$Bundesland== '16']<-"TH"
+laender$Bundesland[laender$Bundesland== '01']<-"SH"
+
+```
+
+
+Visualizing the strata across the federal states aswell as give some overview of basic variables
+
+```{r overview shape counties, echo=TRUE}
+#Importing the shapefile for the counties
+
+
+kreis_data <-kreise %>% left_join(Index_Dataset_context, by= "Kennziffer")
+kreis_data$Partei <-  gsub("P{1}","p", kreis_data$Partei)
+plot(kreis_data)
+plot(kreis_data["Bundesland"], main = "Strata per federal states")
+
+
+```
+
+Preparing data for country level and giver simple overview of the different variables
+```{r overview shape states, echo=TRUE}
+
+
+
+laender_data <-laender %>% left_join(Index_Dataset_context, by= "Bundesland")
+laender_data<-subset(laender_data, Bundesland!="02" & Bundesland!="04" & Bundesland !="11")#clean out Bremen, Berlin and Hamburg
+
+plot(laender_data)
+
+
+```
+
+
+setting colorscheme of capgemini if necessary for county data
+
+```{r colorscheme, echo=TRUE}
+#capgeminis colorcodes
+
+
+colors = c("#56B1F7" ,"#132B43")   
+names(colors) = levels(kreis_data$dig_stry)
+
+#special colorcode for parteilos/noparty
+colors2 = c("#56B1F7" ,"#132B43")   
+names(colors2) = levels(factor(kreis_data$Partei == 'parteilos'))
+```
+
+
+
+Visualizing the digitalization index across German counties 
+```{r digitalization index shape, echo=TRUE}
+
+sfmap <-ggplot()+
+  geom_sf(data=kreis_data,aes(fill=DigInd_f1_100MAP),color = "white")+
+  coord_sf(datum = NA)+  
+  theme_void()+#show no coordinates
+  theme(legend.key.size = unit(1,"line"),                                       
+  legend.key.height= unit(0.5,"line"))  +
+   scale_fill_continuous(name = "Index", high = "#132B43", low = "#56B1F7")  +
+  labs(title="Digitalization in German counties", 
+       subtitle="Index variation across sampled counties",x="",y="") 
+sfmap
+
+```
+
+
+
+```{r digitalization strategy shape, echo=TRUE}
+#Importing the shapefile for the counties
+
+
+colors = c("#56B1F7","#132B43")
+names(colors) = levels(kreis_data$dig_stry) # keep colorcode for capgemini since it is not a continous scale anymore 
+
+strmap <-ggplot()+
+  geom_sf(data=kreis_data,aes(fill=dig_stry),color = "white")+
+  coord_sf(datum = NA)+  
+  theme_void()+ #show no coordinates
+  theme(legend.key.size = unit(1,"line"),                                       
+  legend.key.height= unit(0.5,"line"))  +
+   scale_fill_ordinal(name =  'Presence') +
+  labs(title="Digitalization in German counties", 
+       subtitle="Presence of digitalization strategies ",x="",y="") 
+
+strmap + labs(fill = "Digitalization strategy") + guides(fill = guide_legend(reverse=TRUE)) + scale_fill_manual(values = colors,labels = c("Not available", "Present"))
+
+
+```
+
+Calculating mean of digitalization index by federal state
+
+```{r mean calculation, echo=TRUE}
+#Importing the shapefile for the counties
+
+
+meanlaender <- tapply(laender_data$DigInd_f1_100MAP, laender_data$Bundesland, mean) #calculating Digitalization Index
+meanlaender <- as.data.frame(meanlaender)#change fuction into dataframe
+meanlaender$Bundesland <- rownames(meanlaender)#give rownames own column
+
+
+laender_data <-laender_data %>% left_join(meanlaender, by= "Bundesland")#join with länder data
+
+```
+
+visualizing the mean
+```{r mean visualization, echo=TRUE}
+#Importing the shapefile for the counties
+
+sflaender <-ggplot()+
+  geom_sf(data=laender_data,aes(fill=laender_data$meanlaender),color = "white")+
+  coord_sf(datum = NA)+  
+  theme_void()+#show no coordinates
+  theme(legend.key.size = unit(1,"line"),                                       
+  legend.key.height= unit(0.5,"line"))  +
+   scale_fill_continuous(name = "Index", high = "#132B43", low = "#56B1F7")  +
+  labs(title="Digitalization in German federal states", 
+       subtitle="Aggregated index variation across federal states",x="",y="") 
+sflaender
+
+
+```
+
+
+
+visualizing the universities per state
+```{r universities per state, echo=TRUE}
+
+
+sflaenderUni <-ggplot()+
+  geom_sf(data=laender_data,aes(fill=uni_state),color = "white")+
+  coord_sf(datum = NA)+  
+  theme_void()+#show no coordinates
+  theme(legend.key.size = unit(1,"line"),                                       
+  legend.key.height= unit(0.5,"line"))  +
+   scale_fill_continuous(name = "Universities/Fachhoschulen", high = "#132B43", low = "#56B1F7")  +
+  labs(title="Higher education in German federal states", 
+       subtitle="Variation across federal states",x="",y="") 
+sflaenderUni
+
+
+```
+
+visualizing the universities per county
+```{r universities per county, echo=TRUE}
+
+
+sfunicounty <-ggplot()+
+  geom_sf(data=kreis_data,aes(fill=uni_county),color = "white")+
+  coord_sf(datum = NA)+  
+  theme_void()+#show no coordinates
+  theme(legend.key.size = unit(1,"line"),                                       
+  legend.key.height= unit(0.5,"line"))  +
+   scale_fill_continuous(name = "Count", high = "#132B43", low = "#56B1F7")  +
+  labs(title="Universities per county", 
+       subtitle="University count variation across sampled counties",x="",y="") 
+sfunicounty
+
+
+```
+
+
+visualiizing the distribution of independent county administrators
+
+```{r independent visualization, echo=TRUE}
+
+
+sfmapparteilos <-ggplot()+
+  geom_sf(data=kreis_data,aes(fill=factor(Partei == 'parteilos')),color = "white")+
+  coord_sf(datum = NA)+  
+  theme_void()+#show no coordinates
+  theme(legend.key.size = unit(1,"line"),                                       
+  legend.key.height= unit(0.5,"line")) +
+  labs(title="Independent county administrators", 
+       subtitle="Variation across counties",x="",y="") 
+sfmapparteilos + labs(fill = "Partisanship") + guides(fill = guide_legend(reverse=TRUE)) + scale_fill_manual(values = colors2,labels = c("Party affiliated", "Independent"))
+
+```
+
+
+
+
+
+
+## Bayesian Models
+
+First Model is not incorporating any controls for the state level.Weakly informative priors are used with 0 mean and standard deviation of 5.By default a half Cauchy prior with a scale parameter that depends on the standard deviation of the response variable to remain
+only weakly informative regardless of response variable’s scaling is used. 
+```{r bayesian multilevel models, echo=TRUE}
+
+
+
+No_context <- brm(formula =
+                          DigInd_f1_100MAP ~ 1 + dig_stry + uni_county + no_party + pol_syner + Ppot + Commuters + Life_exp + Pop + Jobless + Students + Distance + GDP + Broadband + Debt + RegionTypeChar + (1|Bundesland),
+                        data = Index_Dataset_context_norm, family = gaussian(),                         
+                        prior = c(set_prior("normal(0,5)", class = "b"),
+                                  set_prior("cauchy(0,2)", class = "sd")),
+                                  warmup = 1000,
+                        iter = 10000, chains = 4, control = list(adapt_delta = 0.99)) 
+summary(No_context, waic = TRUE)
+
+
+
+
+
+Context <- brm(formula =
+                          DigInd_f1_100MAP ~ 1 + dig_stry + uni_county + no_party + pol_syner + Ppot + Commuters + Life_exp + Pop + Jobless + Students + Distance + GDP + Broadband + Debt + RegionTypeChar + (1 + uni_state + IT_Jobs + Avg_Age_state + Density_state + GDP_state|Bundesland),
+                        data = Index_Dataset_context_norm, family = gaussian(),                         
+                        prior = c(set_prior("normal(0,5)", class = "b"),
+                                  set_prior("cauchy(0,2)", class = "sd")),
+                                  warmup = 1000,
+                        iter = 10000, chains = 4, control = list(adapt_delta = 0.99)) 
+summary(Context, waic = TRUE)
+
+```
+
+
+```{r leave out one cross validation, echo=TRUE}
+
+ loo1 <- loo(Context,No_context)
+loo1
+```
+
+```{r Model Table, echo=TRUE}
+Model1 <- tab_model(Context, show.se = TRUE)
+Model1
+```
+
+
+```{r margins plot, echo=TRUE}
+marginal1 <- plot_model(Context, sort.est = TRUE, show.values = TRUE, value.offset = .3, title = "Sorted marginal effects plot of individual level",axis.labels = c("Population potential","Jobless rate","Political Synergy","Indepedent district administrator","GDP","Broadband","Students", "peripheral region", "Distance to urban centre","Commuting ratio","Life Expectancy","Universities per County","Debt","Population","Digitalization Strategy","Small town region"))
+
+marginal1
+
+```
+
+
+visualizing marginal predictive plots
+```{r predictive plots, echo=TRUE}
+
+
+
+
+
+
+int_uni <- plot_model(Context, type = "pred",colors = "#56B1F7", terms = c("uni_county"),title = "Predicted values of Digitalization Index by number of univerisities per county")
+  
+int_uni + labs(y = "Digitalization Index") + labs(x = "Universities/Colleges per county")
+```
+
+
+visualizing forest plots for intercept analysis using brmstools package
+```{r forest plot, echo=TRUE}
+
+
+
+forestmap <- brmstools::forest(Context, pars = "Intercept", sort = TRUE, col_ridge = "#132B43", fill_ridge = "#56B1F7")
+
+
+forestmap + scale_x_continuous(limits = c(-2 , 2))
+```
+visualizing forest plots for intercept analysis using brmstools package
+```{r traceplots plot, echo=TRUE}
+
+plot(Context)
+```
+
+## Addition: Assumptions check for bayesian modeling
+
+From the Partial regression plots we can conclude that the linearity assumption holds for all of the variables. 
+
+```{r partial regression, echo=TRUE}
+
+#Simple Model to check
+
+Reg <- lm(DigInd_f1_100MAP ~ dig_stry + dig_stry + uni_county + no_party + pol_syner + Ppot + Commuters + Life_exp + Pop + Jobless + Students + Distance + GDP + Broadband + Debt + RegionTypeChar, data = Index_Dataset_context_norm)
+
+#Extract partial regression diagrams
+
+avPlot(Reg  , 
+       terms = ~ "uni_county", 
+       variable = "uni_county",
+       xlab = "uni_county",
+       ylab = "Digitalization Index",
+       main = "Partial Regression plots")
+
+
+avPlot(Reg  , 
+       terms = ~"pol_syner", 
+       variable = "pol_syner",
+       xlab = "pol_syner",
+       ylab = "Digitalization Index",
+       main = "Partial Regression plots")
+
+
+avPlot(Reg  , 
+       terms = ~"Ppot", 
+       variable = "Ppot",
+       xlab = "Ppot",
+       ylab = "Digitalization Index",
+       main = "Partial Regression plots")
+
+
+avPlot(Reg  , 
+       terms = ~"Commuters", 
+       variable = "Commuters",
+       xlab = "Commuters",
+       ylab = "Digitalization Index",
+       main = "Partial Regression plots")
+
+avPlot(Reg  , 
+       terms = ~"Life_exp", 
+       variable = "Life_exp",
+       xlab = "Life_exp",
+       ylab = "Digitalization Index",
+       main = "Partial Regression plots")
+
+avPlot(Reg  , 
+       terms = ~"Pop", 
+       variable = "Pop",
+       xlab = "Pop",
+       ylab = "Digitalization Index",
+       main = "Partial Regression plots")
+
+avPlot(Reg  , 
+       terms = ~"Jobless", 
+       variable = "Jobless",
+       xlab = "Jobless",
+       ylab = "Digitalization Index",
+       main = "Partial Regression plots")
+
+
+avPlot(Reg  , 
+       terms = ~"Students", 
+       variable = "Students",
+       xlab = "Students",
+       ylab = "Digitalization Index",
+       main = "Partial Regression plots")
+
+
+avPlot(Reg  , 
+       terms = ~"Distance", 
+       variable = "Distance",
+       xlab = "Distance",
+       ylab = "Digitalization Index",
+       main = "Partial Regression plots")
+
+avPlot(Reg  , 
+       terms = ~"GDP", 
+       variable = "GDP",
+       xlab = "GDP",
+       ylab = "Digitalization Index",
+       main = "Partial Regression plots")
+
+avPlot(Reg  , 
+       terms = ~"Broadband", 
+       variable = "Broadband",
+       xlab = "Broadband",
+       ylab = "Digitalization Index",
+       main = "Partial Regression plots")
+
+
+
+```
+
+
+
+
+
+Variance homogeneity of the residuals (homoscedasticity)
+
+```{r Store regression model and standardized and studentized residuals}
+
+#Save unstandardized residuals as variable uRes
+
+Index_Dataset_context_norm$uRes <- residuals(Reg)
+
+#Store standardized residuals as variable Res
+
+Index_Dataset_context_norm$Res <- stdres(Reg) #<- standardisierte Residuen in R
+
+
+#Save studentized residuals as variable stuRes.
+
+Index_Dataset_context_norm$stuRes <- studres(Reg)
+
+```
+
+
+Scatterplot of residuals looks problematic, however constant variance is visible.  
+```{r Scatterplott}
+#Ausgabe des Streu-Punkt-Diagramms
+
+ggplot(Index_Dataset_context_norm, aes(x = DigInd_f1_100MAP, y = uRes)) +
+  geom_point() +
+  geom_hline(yintercept = 0) +
+  theme_stata()+
+  labs(title = "Scatterplot", 
+       x = "Digitalization Index", 
+       y = "Non-standardized Residuals")
+
+```
+
+**Glejser-Test** 
+
+```{r Studentized residuals amounts and Glejser test.}
+
+
+#Beträge der nicht standardisierten Residuen ausgeben
+
+Index_Dataset_context_norm$absRes <- abs(Index_Dataset_context_norm$uRes)
+
+#Glejser-Test ausgeben
+
+Gl <- lm(DigInd_f1_100MAP ~ dig_stry + + dig_stry + uni_county + no_party + pol_syner + Ppot + Commuters + Life_exp + Pop + Jobless + Students + Distance + GDP + Broadband + Debt + RegionTypeChar, data = Index_Dataset_context_norm)
+summary(lm.beta(Gl))
+```
+
+**Normalverteilung der (studentisierten) Residuen**
+Looks alright to work with. Not perfect but  it is real world data. 
+
+```{r Normal distribution students residuals}
+
+
+#Determine function for normal distribution
+
+bw = 0.3
+n_obs = sum(!is.na(Index_Dataset_context_norm$stuRes))
+Normal <- Normal <- function(x) 
+    dnorm(x, mean = mean(Index_Dataset_context_norm$stuRes), 
+          sd = sd(Index_Dataset_context_norm$stuRes)) * bw * n_obs
+
+#Histogramm mit Normalverteilungskurve ausgeben
+
+ggplot(Index_Dataset_context_norm, aes(stuRes)) +
+  geom_histogram(aes(y = ..count..), 
+                 colour = "black", fill = "grey", 
+                 binwidth = bw) +
+  labs(x = "Student. Residuals", 
+       y = "Frequency") +
+  theme_stata() +
+  stat_function(fun = Normal) 
+
+
+```
+
+Looks good
+```{r QQ Plot}
+
+#Q-Q-Plot ausgeben
+
+ggplot(Index_Dataset_context_norm, aes(sample = stuRes)) +
+  stat_qq() +
+  geom_qq_line(col = "blue") +
+  theme_stata() +
+  coord_flip() +
+  labs(title = "Q-Q Diagramm of student Residuals", 
+       y = "Observed Value", 
+       x = "Expected Value")
+
+```
+
+**Kolmogorov-Smirnov-Test**
+
+The test also underlines the expectation for normality, therefore we can assume to proceed. 
+
+```{r Kolmogorow-Smirnov-Test}
+#Pakete laden
+if(!require("DescTools")) {install.packages("DescTools"); library(DescTools)}
+
+#Lilliefors Kolmogorov-Smirnov-Test ausgeben
+
+LillieTest(Index_Dataset_context_norm$stuRes)
+
+```
+
+
+
+ **Indepedence of Residuals**
+ 
+Durbin Watson is above 1.5 and under 2.5 so this is acceptable. Furthermore as mentioned in the thesis, the sample size is only 114 cases. All the tests and plotting was done to avoid having a completely non-linear output as serves a confirmation for the expectations. 
+```{r Test for independence of the residuals}
+#Pakete laden
+if(!require("lmtest")) {install.packages("lmtest"); library(lmtest)}
+
+#Ausgabe des Durbin-Watson-Test
+dwtest(Reg)
+
+```
+
+
+
+
+
