@@ -117,7 +117,7 @@ Another package, that is important for working more efficiently with packages in
 <!-- Dataset -->
 ## Dataset
 
-There are four different sources of data in my 
+There are four different sources of data in my project
 
 * Inkar_all_counties -> represents all the counties except kreisfreie städte together with relevant contextual data
 * strata_sample -> the stratified randomly sampled counties populated with the 23 different binary items
